@@ -1,14 +1,13 @@
 name: Unblockable Full Sheet Sync Engine
 on:
   schedule:
-    - cron: '*/15 * * * *' # Automatically checks for empty rows every 15 minutes
-  workflow_dispatch: # Lets you start the process manually from your GitHub dashboard at any time
+    - cron: '*/15 * * * *'
+  workflow_dispatch:
 
 jobs:
   sync_and_scrape:
     runs-on: ubuntu-latest
     steps:
-      # Standard version tags that GitHub can easily resolve instantly
       - name: Checkout Repository
         uses: actions/checkout@v4
 
@@ -42,7 +41,6 @@ jobs:
             const sheets = google.sheets({ version: "v4", auth });
             const spreadsheetId = process.env.SPREADSHEET_ID;
 
-            // Fetch current rows from sheet1 tab starting at row 2
             const response = await sheets.spreadsheets.values.get({
               spreadsheetId,
               range: "sheet1!A2:Z"
@@ -54,7 +52,6 @@ jobs:
               return;
             }
 
-            // Write tracking headers down Column M through Z on row 1
             const headers = [
               "Name", "Street Address", "City", "State", "Zip Code", "Country", 
               "Phone", "Email", "Website", "Latitude", "Longitude", 
@@ -67,10 +64,11 @@ jobs:
               requestBody: { values: [headers] }
             });
 
-            const browser = await puppeteer.launch({ headless: true, args: ["--no-sandbox"] });
-            const page = await browser.newPage();
+            let browser = await puppeteer.launch({ headless: true, args: ["--no-sandbox", "--disable-setuid-sandbox"] });
+            let page = await browser.newPage();
             await page.setViewport({ width: 1280, height: 800 });
-            await page.setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36");
+
+            let processedCount = 0;
 
             for (let i = 0; i < rows.length; i++) {
               let url = rows[i][0];
@@ -79,12 +77,30 @@ jobs:
 
               if (!url || !url.startsWith("http") || currentStatus.includes("✅")) continue;
 
-              console.log(`Processing Row ${rowNum}: ${url}`);
+              // ANTI-BOT ROTATION: Close browser every 10 records and open a brand new one
+              if (processedCount > 0 && processedCount % 10 === 0) {
+                console.log("🔄 Rotating browser engine to clear session tracking fingerprints...");
+                await browser.close();
+                await new Promise(r => setTimeout(r, 5000));
+                browser = await puppeteer.launch({ headless: true, args: ["--no-sandbox", "--disable-setuid-sandbox"] });
+                page = await browser.newPage();
+                await page.setViewport({ width: 1280, height: 800 });
+              }
+
+              // BIG COOLDOWN: Every 20 pages, take a 30-second resting pause
+              if (processedCount > 0 && processedCount % 20 === 0) {
+                console.log("⏳ Taking a 30-second human break to cool down server rate limits...");
+                await new Promise(r => setTimeout(r, 30000));
+              }
+
+              console.log(`Processing Row ${rowNum} (#${processedCount + 1}): ${url}`);
+              processedCount++;
 
               try {
+                await page.setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36");
                 await page.goto(url.trim(), { waitUntil: "networkidle2", timeout: 30000 });
                 
-                await page.waitForSelector(".name-selector", { timeout: 4000 }).catch(() => {});
+                await page.waitForSelector(".name-selector", { timeout: 5000 }).catch(() => {});
 
                 const result = await page.evaluate(() => {
                   const getTxt = (sel) => {
@@ -119,7 +135,6 @@ jobs:
                   };
                 });
 
-                // Write the full dataset block across Columns M through Z
                 await sheets.spreadsheets.values.update({
                   spreadsheetId,
                   range: `sheet1!M${rowNum}:Z${rowNum}`,
@@ -143,7 +158,9 @@ jobs:
                 });
               }
               
-              await new Promise(r => setTimeout(r, 2500));
+              // HUMAN RANDOMIZED DELAY: Wait between 3 to 7 seconds before the next page
+              const dynamicDelay = Math.floor(Math.random() * (7000 - 3000 + 1)) + 3000;
+              await new Promise(r => setTimeout(r, dynamicDelay));
             }
             await browser.close();
           }
