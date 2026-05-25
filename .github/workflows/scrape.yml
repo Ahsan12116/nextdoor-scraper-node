@@ -24,7 +24,7 @@ jobs:
           GOOGLE_CREDS: ${{ secrets.GOOGLE_CREDENTIALS }}
           # =========================================================
           # PASTE YOUR ACTUAL GOOGLE SPREADSHEET URL ID HERE:
-          SPREADSHEET_ID: "PASTE_YOUR_SPREADSHEET_ID_HERE"
+          SPREADSHEET_ID: "1aIdDfNsFdUqFDDZHpGcnppiVNVr4faOhPqrUo-rnurQ/edit?gid=446565690#gid=446565690"
           # =========================================================
         run: |
           node -e '
