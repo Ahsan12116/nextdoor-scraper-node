@@ -4,6 +4,10 @@ on:
     - cron: '*/15 * * * *' # Automatically checks for empty rows every 15 minutes
   workflow_dispatch: # Lets you start the process manually from your GitHub dashboard at any time
 
+env:
+  # Opt into the updated runtime to clear deprecation warnings instantly
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
 jobs:
   sync_and_scrape:
     runs-on: ubuntu-latest
@@ -14,7 +18,7 @@ jobs:
       - name: Setup Node.js Environment
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 24 # Upgraded to use the new native environment smoothly
 
       - name: Install Production Core Packages
         run: npm install puppeteer puppeteer-extra puppeteer-extra-plugin-stealth googleapis
@@ -73,7 +77,6 @@ jobs:
 
             for (let i = 0; i < rows.length; i++) {
               let url = rows[i][0];
-              // The status field is at index 25 (Column Z) relative to row wide mapping arrays
               let currentStatus = rows[i][25] ? rows[i][25].toString() : "";
               let rowNum = i + 2; 
 
@@ -93,11 +96,9 @@ jobs:
                     return el ? el.innerText.trim() : "Not found";
                   };
 
-                  // Parse multiple categories into a clean text string
                   const cats = Array.from(document.querySelectorAll(".category-selector")).map(el => el.innerText.trim());
                   const categoriesStr = cats.length > 0 ? cats.join(", ") : "Not found";
 
-                  // Parse operational business calendar parameters
                   const days = Array.from(document.querySelectorAll(".day-of-week-selector")).map(el => el.innerText.trim());
                   const hours = Array.from(document.querySelectorAll(".day-of-week-hours-selector")).map(el => el.innerText.trim());
                   let calendarStr = "Not found";
@@ -146,7 +147,6 @@ jobs:
                 });
               }
               
-              // Safe processing break between rows
               await new Promise(r => setTimeout(r, 2500));
             }
             await browser.close();
