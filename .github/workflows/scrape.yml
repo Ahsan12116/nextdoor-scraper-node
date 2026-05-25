@@ -4,21 +4,17 @@ on:
     - cron: '*/15 * * * *' # Automatically checks for empty rows every 15 minutes
   workflow_dispatch: # Lets you start the process manually from your GitHub dashboard at any time
 
-env:
-  # Opt into the updated runtime to clear deprecation warnings instantly
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
-
 jobs:
   sync_and_scrape:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v4.2.2 # Explicit clean release patch
 
       - name: Setup Node.js Environment
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v4.1.0 # Native setup node release
         with:
-          node-version: 24 # Upgraded to use the new native environment smoothly
+          node-version: 24
 
       - name: Install Production Core Packages
         run: npm install puppeteer puppeteer-extra puppeteer-extra-plugin-stealth googleapis
@@ -87,7 +83,6 @@ jobs:
               try {
                 await page.goto(url.trim(), { waitUntil: "networkidle2", timeout: 30000 });
                 
-                // Allow the dynamic client-side elements a few moments to render
                 await page.waitForSelector(".name-selector", { timeout: 4000 }).catch(() => {});
 
                 const result = await page.evaluate(() => {
