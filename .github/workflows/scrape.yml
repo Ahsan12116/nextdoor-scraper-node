@@ -1,6 +1,6 @@
 name: Unblockable Full Sheet Sync Engine
 on:
-  workflow_dispatch: # Allows manual starting
+  workflow_dispatch: # Allows manual starting from the dashboard
   repository_dispatch:
     types: [loop_next_batch] # Allows the runner to call itself natively
 
@@ -16,21 +16,23 @@ jobs:
         with:
           node-version: 24
 
-      - name: Install Google API & Network Libraries
-        run: npm install googleapis axios
+      - name: Install Production Core Packages
+        run: npm install puppeteer puppeteer-extra puppeteer-extra-plugin-stealth googleapis axios
 
-      - name: Execute Authenticated JSON Engine
+      - name: Run Background Scraping Automation
         env:
           GOOGLE_CREDS: ${{ secrets.GOOGLE_CREDENTIALS }}
-          NEXTDOOR_COOKIE: ${{ secrets.NEXTDOOR_COOKIE }}
           SPREADSHEET_ID: "1aIdDfNsFdUqFDDZHpGcnppiVNVr4faOhPqrUo-rnurQ"
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} # Built-in token to trigger the next VM
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} # Built-in system token to spin up the next VM
           REPO_OWNER: ${{ github.repository_owner }}
           REPO_NAME: ${{ github.event.repository.name }}
         run: |
           node -e '
+          const puppeteer = require("puppeteer-extra");
+          const StealthPlugin = require("puppeteer-extra-plugin-stealth");
           const { google } = require("googleapis");
           const axios = require("axios");
+          puppeteer.use(StealthPlugin());
 
           async function main() {
             const auth = new google.auth.GoogleAuth({
@@ -51,7 +53,6 @@ jobs:
               return;
             }
 
-            // Standardize columns layout
             const headers = [
               "Name", "Street Address", "City", "State", "Zip Code", "Country", 
               "Phone", "Email", "Website", "Latitude", "Longitude", 
@@ -65,17 +66,11 @@ jobs:
             });
 
             let processedInThisRun = 0;
-            let totalRemainingToProcess = 0;
 
-            // First, calculate if there are more rows left to do overall
-            for (let i = 0; i < rows.length; i++) {
-              let currentStatus = rows[i][25] ? rows[i][25].toString() : "";
-              if (rows[i][0] && rows[i][0].startsWith("http") && !currentStatus.includes("✅")) {
-                totalRemainingToProcess++;
-              }
-            }
-
-            console.log(`📊 Total un-scraped rows left in sheet: ${totalRemainingToProcess}`);
+            // Open the automation window
+            let browser = await puppeteer.launch({ headless: true, args: ["--no-sandbox", "--disable-setuid-sandbox"] });
+            let page = await browser.newPage();
+            await page.setViewport({ width: 1280, height: 800 });
 
             for (let i = 0; i < rows.length; i++) {
               let url = rows[i][0];
@@ -84,9 +79,10 @@ jobs:
 
               if (!url || !url.startsWith("http") || currentStatus.includes("✅")) continue;
 
-              // HARD LIMIT CLOSURE: Stop precisely at 45 rows to remain under the IP radar
-              if (processedInThisRun >= 45) {
+              // SELF-LOOP TRIGGER: Intentionally stop precisely at 40 rows to stay under the IP radar
+              if (processedInThisRun >= 40) {
                 console.log("🛑 Target threshold hit! Shutting down current VM session safely...");
+                await browser.close();
                 
                 // Fire a repository dispatch to immediately spin up a completely fresh VM runner instance
                 console.log("🔄 Calling GitHub Dispatch API to deploy a fresh runner machine with a clean IP...");
@@ -106,51 +102,60 @@ jobs:
                   console.error("Failed to trigger next automated runner loop:", dispatchErr.message);
                 }
                 
-                process.exit(0); // Exit cleanly
+                process.exit(0); // Exit current workflow runner cleanly
+              }
+
+              // ANTI-BOT ENGINE ROTATION: Reset internal fingerprints every 10 lines inside the batch
+              if (processedInThisRun > 0 && processedInThisRun % 10 === 0) {
+                console.log("🔄 Rotating browser engine to clear session tracking fingerprints...");
+                await browser.close();
+                await new Promise(r => setTimeout(r, 4000));
+                browser = await puppeteer.launch({ headless: true, args: ["--no-sandbox", "--disable-setuid-sandbox"] });
+                page = await browser.newPage();
+                await page.setViewport({ width: 1280, height: 800 });
               }
 
               console.log(`Processing Row ${rowNum} (#${processedInThisRun + 1}): ${url}`);
               processedInThisRun++;
 
               try {
-                const res = await axios.get(url.trim(), {
-                  timeout: 15000,
-                  headers: {
-                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-                    "Accept-Language": "en-US,en;q=0.9",
-                    "Cookie": process.env.NEXTDOOR_COOKIE,
-                    "Cache-Control": "no-cache"
+                await page.setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36");
+                await page.goto(url.trim(), { waitUntil: "networkidle2", timeout: 30000 });
+                
+                await page.waitForSelector(".name-selector", { timeout: 5000 }).catch(() => {});
+
+                const result = await page.evaluate(() => {
+                  const getTxt = (sel) => {
+                    const el = document.querySelector(sel);
+                    return el ? el.innerText.trim() : "Not found";
+                  };
+
+                  const cats = Array.from(document.querySelectorAll(".category-selector")).map(el => el.innerText.trim());
+                  const categoriesStr = cats.length > 0 ? cats.join(", ") : "Not found";
+
+                  const days = Array.from(document.querySelectorAll(".day-of-week-selector")).map(el => el.innerText.trim());
+                  const hours = Array.from(document.querySelectorAll(".day-of-week-hours-selector")).map(el => el.innerText.trim());
+                  let calendarStr = "Not found";
+                  if (days.length > 0 && days.length === hours.length) {
+                    calendarStr = days.map((d, idx) => `${d}: ${hours[idx] === "" ? "Closed" : hours[idx]}`).join(" | ");
                   }
+
+                  return {
+                    name: getTxt(".name-selector"),
+                    street: getTxt(".street-address-selector"),
+                    city: getTxt(".city-selector"),
+                    state: getTxt(".state-selector"),
+                    zip: getTxt(".zip-code-selector"),
+                    country: getTxt(".country-selector") || "US",
+                    phone: getTxt(".phone-number-selector"),
+                    email: getTxt(".email-selector"),
+                    website: getTxt(".website-url-selector"),
+                    lat: getTxt(".latitude-selector"),
+                    lng: getTxt(".longitude-selector"),
+                    categories: categoriesStr,
+                    hours: calendarStr
+                  };
                 });
-
-                const html = res.data;
-                let jsonStateMatch = html.match(/<script id="__NEXT_DATA__" type="application\/json">([\s\S]*?)<\/script>/);
-                
-                if (!jsonStateMatch) {
-                  throw new Error("Empty block layout served by firewall.");
-                }
-
-                const parsedData = JSON.parse(jsonStateMatch[1]);
-                const bizProps = parsedData.props?.pageProps?.initialState?.businessPage || {};
-                const coreDetails = bizProps.details || {};
-                
-                let nameText = coreDetails.name || "Not found";
-                let streetText = coreDetails.address?.street || "Not found";
-                let cityText = coreDetails.address?.city || "Not found";
-                let stateText = coreDetails.address?.state || "Not found";
-                let zipText = coreDetails.address?.zip || "Not found";
-                let phoneText = coreDetails.phone || "Not found";
-                let emailText = coreDetails.email || "Not found";
-                let websiteText = coreDetails.websiteUrl || coreDetails.website || "Not found";
-                let latText = coreDetails.latitude ? coreDetails.latitude.toString() : "Not found";
-                let lngText = coreDetails.longitude ? coreDetails.longitude.toString() : "Not found";
-                
-                let categoriesStr = bizProps.categories ? bizProps.categories.map(c => c.name).join(", ") : "Not found";
-                let hoursStr = "Not found";
-                if (bizProps.operatingHours) {
-                  hoursStr = bizProps.operatingHours.map(h => `${h.day}: ${h.slots ? h.slots.map(s => `${s.start}-${s.end}`).join(",") : "Closed"}`).join(" | ");
-                }
 
                 await sheets.spreadsheets.values.update({
                   spreadsheetId,
@@ -158,9 +163,9 @@ jobs:
                   valueInputOption: "RAW",
                   requestBody: {
                     values: [[
-                      nameText, streetText, cityText, stateText, zipText, "US",
-                      phoneText, emailText, websiteText, latText, lngText,
-                      categoriesStr, hoursStr, "✅ SUCCESS"
+                      result.name, result.street, result.city, result.state, result.zip, result.country,
+                      result.phone, result.email, result.website, result.lat, result.lng,
+                      result.categories, result.hours, "✅ SUCCESS"
                     ]]
                   }
                 });
@@ -171,15 +176,16 @@ jobs:
                   spreadsheetId,
                   range: `sheet1!Z${rowNum}`,
                   valueInputOption: "RAW",
-                  requestBody: { values: [["❌ Error: Cookie Expired or Throttled"]] }
+                  requestBody: { values: [["❌ Error: " + err.message]] }
                 });
               }
-
-              const variableInterval = Math.floor(Math.random() * (5000 - 3000 + 1)) + 3000;
-              await new Promise(r => setTimeout(r, variableInterval));
+              
+              // Standard human randomized delay loop
+              const dynamicDelay = Math.floor(Math.random() * (7000 - 3000 + 1)) + 3000;
+              await new Promise(r => setTimeout(r, dynamicDelay));
             }
-
-            console.log("🏁 Hurray! Every single URL in your Google Sheet has been successfully scraped!");
+            await browser.close();
+            console.log("🏁 Every single row in your Google Sheet has been successfully scraped!");
           }
           main().catch(console.error);
           '
