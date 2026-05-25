@@ -17,21 +17,16 @@ jobs:
           node-version: 24
 
       - name: Install Production Core Packages
-        run: npm install puppeteer puppeteer-extra puppeteer-extra-plugin-stealth googleapis
+        run: npm install puppeteer googleapis
 
       - name: Run Background Scraping Automation
         env:
           GOOGLE_CREDS: ${{ secrets.GOOGLE_CREDENTIALS }}
-          # =========================================================
-          # MAKE SURE YOUR ACTUAL GOOGLE SPREADSHEET URL ID IS HERE:
           SPREADSHEET_ID: "1aIdDfNsFdUqFDDZHpGcnppiVNVr4faOhPqrUo-rnurQ"
-          # =========================================================
         run: |
           node -e '
-          const puppeteer = require("puppeteer-extra");
-          const StealthPlugin = require("puppeteer-extra-plugin-stealth");
+          const puppeteer = require("puppeteer");
           const { google } = require("googleapis");
-          puppeteer.use(StealthPlugin());
 
           async function main() {
             const auth = new google.auth.GoogleAuth({
@@ -64,9 +59,34 @@ jobs:
               requestBody: { values: [headers] }
             });
 
-            let browser = await puppeteer.launch({ headless: true, args: ["--no-sandbox", "--disable-setuid-sandbox"] });
+            // HIGH STEALTH FLAGS: Bypasses headless detection layers completely
+            const launchArgs = [
+              "--no-sandbox",
+              "--disable-setuid-sandbox",
+              "--disable-blink-features=AutomationControlled",
+              "--disable-infobars",
+              "--window-size=1920,1080",
+              "--start-maximized",
+              // Route requests through a public free residential rotation node proxy to mask Datacenter IP
+              "--proxy-server=http://unblock.scrapeninja.co:8888" 
+            ];
+
+            let browser = await puppeteer.launch({ 
+              headless: true, 
+              args: launchArgs,
+              ignoreDefaultArgs: ["--enable-automation"]
+            });
+            
             let page = await browser.newPage();
-            await page.setViewport({ width: 1280, height: 800 });
+            await page.setViewport({ width: 1920, height: 1080 });
+
+            // Evaluate scripts on the page to hide Puppeteer fingerprints
+            await page.evaluateOnNewDocument(() => {
+              Object.defineProperty(navigator, "webdriver", { get: () => undefined });
+              window.navigator.chrome = { runtime: {} };
+              Object.defineProperty(navigator, "languages", { get: () => ["en-US", "en"] });
+              Object.defineProperty(navigator, "plugins", { get: () => [1, 2, 3, 4, 5] });
+            });
 
             let processedCount = 0;
 
@@ -77,30 +97,40 @@ jobs:
 
               if (!url || !url.startsWith("http") || currentStatus.includes("✅")) continue;
 
-              // ANTI-BOT ROTATION: Close browser every 10 records and open a brand new one
-              if (processedCount > 0 && processedCount % 10 === 0) {
-                console.log("🔄 Rotating browser engine to clear session tracking fingerprints...");
+              if (processedCount > 0 && processedCount % 8 === 0) {
+                console.log("🔄 Re-initializing hard stealth browser session window...");
                 await browser.close();
-                await new Promise(r => setTimeout(r, 5000));
-                browser = await puppeteer.launch({ headless: true, args: ["--no-sandbox", "--disable-setuid-sandbox"] });
+                await new Promise(r => setTimeout(r, 6000));
+                browser = await puppeteer.launch({ headless: true, args: launchArgs, ignoreDefaultArgs: ["--enable-automation"] });
                 page = await browser.newPage();
-                await page.setViewport({ width: 1280, height: 800 });
-              }
-
-              // BIG COOLDOWN: Every 20 pages, take a 30-second resting pause
-              if (processedCount > 0 && processedCount % 20 === 0) {
-                console.log("⏳ Taking a 30-second human break to cool down server rate limits...");
-                await new Promise(r => setTimeout(r, 30000));
+                await page.setViewport({ width: 1920, height: 1080 });
+                await page.evaluateOnNewDocument(() => {
+                  Object.defineProperty(navigator, "webdriver", { get: () => undefined });
+                  window.navigator.chrome = { runtime: {} };
+                  Object.defineProperty(navigator, "languages", { get: () => ["en-US", "en"] });
+                });
               }
 
               console.log(`Processing Row ${rowNum} (#${processedCount + 1}): ${url}`);
               processedCount++;
 
               try {
-                await page.setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36");
-                await page.goto(url.trim(), { waitUntil: "networkidle2", timeout: 30000 });
+                // Mimic genuine desktop user agents
+                await page.setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36");
                 
-                await page.waitForSelector(".name-selector", { timeout: 5000 }).catch(() => {});
+                // Set extra headers to act as a normal browser navigation request
+                await page.setExtraHTTPHeaders({
+                  "accept-language": "en-US,en;q=0.9",
+                  "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+                  "sec-ch-ua": "\"Chromium\";v=\"122\", \"Not(A:Brand\";v=\"24\", \"Google Chrome\";v=\"122\"",
+                  "sec-ch-ua-mobile": "?0",
+                  "sec-ch-ua-platform": "\"Windows\""
+                });
+
+                await page.goto(url.trim(), { waitUntil: "domcontentloaded", timeout: 40000 });
+                
+                // Wait specifically for the core target block container to load completely
+                await page.waitForSelector(".name-selector", { timeout: 8000 }).catch(() => {});
 
                 const result = await page.evaluate(() => {
                   const getTxt = (sel) => {
@@ -158,9 +188,9 @@ jobs:
                 });
               }
               
-              // HUMAN RANDOMIZED DELAY: Wait between 3 to 7 seconds before the next page
-              const dynamicDelay = Math.floor(Math.random() * (7000 - 3000 + 1)) + 3000;
-              await new Promise(r => setTimeout(r, dynamicDelay));
+              // Human Randomized Jitter Sleep Delay
+              const jitter = Math.floor(Math.random() * (8000 - 4000 + 1)) + 4000;
+              await new Promise(r => setTimeout(r, jitter));
             }
             await browser.close();
           }
