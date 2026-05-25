@@ -1,19 +1,19 @@
 name: Unblockable Full Sheet Sync Engine
 on:
   schedule:
-    - cron: '*/15 * * * *'
-  workflow_dispatch:
+    - cron: '*/15 * * * *' # Automatically checks for empty rows every 15 minutes
+  workflow_dispatch: # Lets you start the process manually from your GitHub dashboard at any time
 
 jobs:
   sync_and_scrape:
     runs-on: ubuntu-latest
     steps:
-      # Native Node 24 execution using specific commit hashes
+      # Standard version tags that GitHub can easily resolve instantly
       - name: Checkout Repository
-        uses: actions/checkout@eef6142da24265b6d814c4ef1edcd473855a0333 
+        uses: actions/checkout@v4
 
       - name: Setup Node.js Environment
-        uses: actions/setup-node@3922559a242c41d4c174b86a8313946221c68f23
+        uses: actions/setup-node@v4
         with:
           node-version: 24
 
