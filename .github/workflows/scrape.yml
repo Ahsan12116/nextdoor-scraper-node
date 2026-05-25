@@ -1,8 +1,8 @@
 name: Unblockable Full Sheet Sync Engine
 on:
-  workflow_dispatch: # Allows manual starting from the dashboard
+  workflow_dispatch:
   repository_dispatch:
-    types: [loop_next_batch] # Allows the runner to call itself natively
+    types: [loop_next_batch]
 
 jobs:
   sync_and_scrape:
@@ -23,7 +23,7 @@ jobs:
         env:
           GOOGLE_CREDS: ${{ secrets.GOOGLE_CREDENTIALS }}
           SPREADSHEET_ID: "1aIdDfNsFdUqFDDZHpGcnppiVNVr4faOhPqrUo-rnurQ"
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} # Built-in system token to spin up the next VM
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO_OWNER: ${{ github.repository_owner }}
           REPO_NAME: ${{ github.event.repository.name }}
         run: |
@@ -65,26 +65,96 @@ jobs:
               requestBody: { values: [headers] }
             });
 
-            let processedInThisRun = 0;
-
-            // Open the automation window
-            let browser = await puppeteer.launch({ headless: true, args: ["--no-sandbox", "--disable-setuid-sandbox"] });
-            let page = await browser.newPage();
-            await page.setViewport({ width: 1280, height: 800 });
-
+            // Filter out rows that are already completed
+            const tasks = [];
             for (let i = 0; i < rows.length; i++) {
               let url = rows[i][0];
               let currentStatus = rows[i][25] ? rows[i][25].toString() : "";
-              let rowNum = i + 2; 
+              let rowNum = i + 2;
+              if (url && url.startsWith("http") && !currentStatus.includes("✅")) {
+                tasks.push({ url: url.trim(), rowNum: rowNum });
+              }
+            }
 
-              if (!url || !url.startsWith("http") || currentStatus.includes("✅")) continue;
+            if (tasks.length === 0) {
+              console.log("🏁 Every single row in your Google Sheet has been successfully scraped!");
+              return;
+            }
 
-              // SELF-LOOP TRIGGER: Intentionally stop precisely at 40 rows to stay under the IP radar
-              if (processedInThisRun >= 40) {
-                console.log("🛑 Target threshold hit! Shutting down current VM session safely...");
+            // Define multi-threading batch limit (3 operations simultaneously)
+            const CONCURRENCY_LIMIT = 3;
+            const BATCH_TARGET_LIMIT = 40; // Max rows per VM before self-loop rotation
+            
+            let browser = await puppeteer.launch({ headless: true, args: ["--no-sandbox", "--disable-setuid-sandbox"] });
+            let processedInThisRun = 0;
+
+            // Worker loop function running parallel channels
+            async function scrapeWorker(task) {
+              let page = await browser.newPage();
+              await page.setViewport({ width: 1280, height: 800 });
+              console.log(`🚀 [Row ${task.rowNum}] Launching worker thread for: ${task.url}`);
+
+              try {
+                await page.setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36");
+                await page.goto(task.url, { waitUntil: "networkidle2", timeout: 35000 });
+                await page.waitForSelector(".name-selector", { timeout: 6000 }).catch(() => {});
+
+                const result = await page.evaluate(() => {
+                  const getTxt = (sel) => {
+                    const el = document.querySelector(sel);
+                    return el ? el.innerText.trim() : "Not found";
+                  };
+                  const cats = Array.from(document.querySelectorAll(".category-selector")).map(el => el.innerText.trim());
+                  const days = Array.from(document.querySelectorAll(".day-of-week-selector")).map(el => el.innerText.trim());
+                  const hours = Array.from(document.querySelectorAll(".day-of-week-hours-selector")).map(el => el.innerText.trim());
+                  
+                  let calendarStr = "Not found";
+                  if (days.length > 0 && days.length === hours.length) {
+                    calendarStr = days.map((d, idx) => `${d}: ${hours[idx] === "" ? "Closed" : hours[idx]}`).join(" | ");
+                  }
+                  return {
+                    name: getTxt(".name-selector"), street: getTxt(".street-address-selector"),
+                    city: getTxt(".city-selector"), state: getTxt(".state-selector"),
+                    zip: getTxt(".zip-code-selector"), country: getTxt(".country-selector") || "US",
+                    phone: getTxt(".phone-number-selector"), email: getTxt(".email-selector"),
+                    website: getTxt(".website-url-selector"), lat: getTxt(".latitude-selector"), lng: getTxt(".longitude-selector"),
+                    categories: cats.length > 0 ? cats.join(", ") : "Not found", hours: calendarStr
+                  };
+                });
+
+                await sheets.spreadsheets.values.update({
+                  spreadsheetId,
+                  range: `sheet1!M${task.rowNum}:Z${task.rowNum}`,
+                  valueInputOption: "RAW",
+                  requestBody: {
+                    values: [[
+                      result.name, result.street, result.city, result.state, result.zip, result.country,
+                      result.phone, result.email, result.website, result.lat, result.lng,
+                      result.categories, result.hours, "✅ SUCCESS"
+                    ]]
+                  }
+                });
+                console.log(`⚡ [Row ${task.rowNum}] Successfully written to Google Sheet.`);
+
+              } catch (err) {
+                console.error(`❌ [Row ${task.rowNum}] Thread processing error:`, err.message);
+                await sheets.spreadsheets.values.update({
+                  spreadsheetId,
+                  range: `sheet1!Z${task.rowNum}`,
+                  valueInputOption: "RAW",
+                  requestBody: { values: [["❌ Error: " + err.message]] }
+                });
+              } finally {
+                await page.close();
+              }
+            }
+
+            // Process tasks in concurrent groups of 3
+            for (let i = 0; i < tasks.length; i += CONCURRENCY_LIMIT) {
+              if (processedInThisRun >= BATCH_TARGET_LIMIT) {
+                console.log("🛑 Target batch threshold reached! Shutting down current VM session safely...");
                 await browser.close();
-                
-                // Fire a repository dispatch to immediately spin up a completely fresh VM runner instance
+
                 console.log("🔄 Calling GitHub Dispatch API to deploy a fresh runner machine with a clean IP...");
                 try {
                   await axios.post(
@@ -101,91 +171,22 @@ jobs:
                 } catch (dispatchErr) {
                   console.error("Failed to trigger next automated runner loop:", dispatchErr.message);
                 }
-                
-                process.exit(0); // Exit current workflow runner cleanly
+                process.exit(0);
               }
 
-              // ANTI-BOT ENGINE ROTATION: Reset internal fingerprints every 10 lines inside the batch
-              if (processedInThisRun > 0 && processedInThisRun % 10 === 0) {
-                console.log("🔄 Rotating browser engine to clear session tracking fingerprints...");
-                await browser.close();
-                await new Promise(r => setTimeout(r, 4000));
-                browser = await puppeteer.launch({ headless: true, args: ["--no-sandbox", "--disable-setuid-sandbox"] });
-                page = await browser.newPage();
-                await page.setViewport({ width: 1280, height: 800 });
-              }
-
-              console.log(`Processing Row ${rowNum} (#${processedInThisRun + 1}): ${url}`);
-              processedInThisRun++;
-
-              try {
-                await page.setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36");
-                await page.goto(url.trim(), { waitUntil: "networkidle2", timeout: 30000 });
-                
-                await page.waitForSelector(".name-selector", { timeout: 5000 }).catch(() => {});
-
-                const result = await page.evaluate(() => {
-                  const getTxt = (sel) => {
-                    const el = document.querySelector(sel);
-                    return el ? el.innerText.trim() : "Not found";
-                  };
-
-                  const cats = Array.from(document.querySelectorAll(".category-selector")).map(el => el.innerText.trim());
-                  const categoriesStr = cats.length > 0 ? cats.join(", ") : "Not found";
-
-                  const days = Array.from(document.querySelectorAll(".day-of-week-selector")).map(el => el.innerText.trim());
-                  const hours = Array.from(document.querySelectorAll(".day-of-week-hours-selector")).map(el => el.innerText.trim());
-                  let calendarStr = "Not found";
-                  if (days.length > 0 && days.length === hours.length) {
-                    calendarStr = days.map((d, idx) => `${d}: ${hours[idx] === "" ? "Closed" : hours[idx]}`).join(" | ");
-                  }
-
-                  return {
-                    name: getTxt(".name-selector"),
-                    street: getTxt(".street-address-selector"),
-                    city: getTxt(".city-selector"),
-                    state: getTxt(".state-selector"),
-                    zip: getTxt(".zip-code-selector"),
-                    country: getTxt(".country-selector") || "US",
-                    phone: getTxt(".phone-number-selector"),
-                    email: getTxt(".email-selector"),
-                    website: getTxt(".website-url-selector"),
-                    lat: getTxt(".latitude-selector"),
-                    lng: getTxt(".longitude-selector"),
-                    categories: categoriesStr,
-                    hours: calendarStr
-                  };
-                });
-
-                await sheets.spreadsheets.values.update({
-                  spreadsheetId,
-                  range: `sheet1!M${rowNum}:Z${rowNum}`,
-                  valueInputOption: "RAW",
-                  requestBody: {
-                    values: [[
-                      result.name, result.street, result.city, result.state, result.zip, result.country,
-                      result.phone, result.email, result.website, result.lat, result.lng,
-                      result.categories, result.hours, "✅ SUCCESS"
-                    ]]
-                  }
-                });
-
-              } catch (err) {
-                console.error(`Error on row ${rowNum}:`, err.message);
-                await sheets.spreadsheets.values.update({
-                  spreadsheetId,
-                  range: `sheet1!Z${rowNum}`,
-                  valueInputOption: "RAW",
-                  requestBody: { values: [["❌ Error: " + err.message]] }
-                });
-              }
+              const batch = tasks.slice(i, i + CONCURRENCY_LIMIT);
+              processedInThisRun += batch.length;
               
-              // Standard human randomized delay loop
-              const dynamicDelay = Math.floor(Math.random() * (7000 - 3000 + 1)) + 3000;
+              // Fire off all 3 scraping workers asynchronously at the exact same time
+              await Promise.all(batch.map(task => scrapeWorker(task)));
+              
+              // Small pacing delay between concurrent batches
+              const dynamicDelay = Math.floor(Math.random() * (5000 - 3000 + 1)) + 3000;
               await new Promise(r => setTimeout(r, dynamicDelay));
             }
+
             await browser.close();
-            console.log("🏁 Every single row in your Google Sheet has been successfully scraped!");
+            console.log("🏁 All available rows have been processed!");
           }
           main().catch(console.error);
           '
