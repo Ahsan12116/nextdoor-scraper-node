@@ -1,8 +1,8 @@
-name: Unblockable Sheet Sync Engine
+name: Unblockable Full Sheet Sync Engine
 on:
   schedule:
-    - cron: '*/15 * * * *' # Runs automatically every 15 minutes to clear your queue tab safely
-  workflow_dispatch: # Allows you to force a live run manually via your actions tab anytime
+    - cron: '*/15 * * * *' # Automatically checks for empty rows every 15 minutes
+  workflow_dispatch: # Lets you start the process manually from your GitHub dashboard at any time
 
 jobs:
   sync_and_scrape:
@@ -11,7 +11,7 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Setup Node Node Environment
+      - name: Setup Node.js Environment
         uses: actions/setup-node@v4
         with:
           node-version: 20
@@ -23,8 +23,8 @@ jobs:
         env:
           GOOGLE_CREDS: ${{ secrets.GOOGLE_CREDENTIALS }}
           # =========================================================
-          # PASTE YOUR ACTUAL GOOGLE SPREADSHEET URL ID HERE:
-          SPREADSHEET_ID: "1aIdDfNsFdUqFDDZHpGcnppiVNVr4faOhPqrUo-rnurQ/edit?gid=446565690#gid=446565690"
+          # MAKE SURE YOUR ACTUAL GOOGLE SPREADSHEET URL ID IS HERE:
+          SPREADSHEET_ID: "1aIdDfNsFdUqFDDZHpGcnppiVNVr4faOhPqrUo-rnurQ"
           # =========================================================
         run: |
           node -e '
@@ -41,10 +41,10 @@ jobs:
             const sheets = google.sheets({ version: "v4", auth });
             const spreadsheetId = process.env.SPREADSHEET_ID;
 
-            // Fetch current rows from sheet1 tab
+            // Fetch current rows from sheet1 tab starting at row 2
             const response = await sheets.spreadsheets.values.get({
               spreadsheetId,
-              range: "sheet1!A2:O"
+              range: "sheet1!A2:Z"
             });
             
             const rows = response.data.values;
@@ -53,53 +53,101 @@ jobs:
               return;
             }
 
+            // Write tracking headers down Column M through Z on row 1
+            const headers = [
+              "Name", "Street Address", "City", "State", "Zip Code", "Country", 
+              "Phone", "Email", "Website", "Latitude", "Longitude", 
+              "Categories", "Hours", "Status"
+            ];
+            await sheets.spreadsheets.values.update({
+              spreadsheetId,
+              range: "sheet1!M1:Z1",
+              valueInputOption: "RAW",
+              requestBody: { values: [headers] }
+            });
+
             const browser = await puppeteer.launch({ headless: true, args: ["--no-sandbox"] });
             const page = await browser.newPage();
+            await page.setViewport({ width: 1280, height: 800 });
             await page.setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36");
 
             for (let i = 0; i < rows.length; i++) {
               let url = rows[i][0];
-              let currentStatus = rows[i][14] ? rows[i][14].toString() : "";
+              // The status field is at index 25 (Column Z) relative to row wide mapping arrays
+              let currentStatus = rows[i][25] ? rows[i][25].toString() : "";
               let rowNum = i + 2; 
 
               if (!url || !url.startsWith("http") || currentStatus.includes("✅")) continue;
 
               console.log(`Processing Row ${rowNum}: ${url}`);
-              let emailText = "Not found";
-              let websiteText = "Not found";
-              let statusText = "✅ SUCCESS";
 
               try {
                 await page.goto(url.trim(), { waitUntil: "networkidle2", timeout: 30000 });
-                await page.waitForSelector(".email-selector", { timeout: 5000 }).catch(() => {});
+                
+                // Allow the dynamic client-side elements a few moments to render
+                await page.waitForSelector(".name-selector", { timeout: 4000 }).catch(() => {});
 
                 const result = await page.evaluate(() => {
-                  const eEl = document.querySelector(".email-selector");
-                  const wEl = document.querySelector(".website-url-selector");
+                  const getTxt = (sel) => {
+                    const el = document.querySelector(sel);
+                    return el ? el.innerText.trim() : "Not found";
+                  };
+
+                  // Parse multiple categories into a clean text string
+                  const cats = Array.from(document.querySelectorAll(".category-selector")).map(el => el.innerText.trim());
+                  const categoriesStr = cats.length > 0 ? cats.join(", ") : "Not found";
+
+                  // Parse operational business calendar parameters
+                  const days = Array.from(document.querySelectorAll(".day-of-week-selector")).map(el => el.innerText.trim());
+                  const hours = Array.from(document.querySelectorAll(".day-of-week-hours-selector")).map(el => el.innerText.trim());
+                  let calendarStr = "Not found";
+                  if (days.length > 0 && days.length === hours.length) {
+                    calendarStr = days.map((d, idx) => `${d}: ${hours[idx] === "" ? "Closed" : hours[idx]}`).join(" | ");
+                  }
+
                   return {
-                    email: eEl ? eEl.innerText.trim() : "Not found",
-                    website: wEl ? wEl.innerText.trim() : "Not found"
+                    name: getTxt(".name-selector"),
+                    street: getTxt(".street-address-selector"),
+                    city: getTxt(".city-selector"),
+                    state: getTxt(".state-selector"),
+                    zip: getTxt(".zip-code-selector"),
+                    country: getTxt(".country-selector") || "US",
+                    phone: getTxt(".phone-number-selector"),
+                    email: getTxt(".email-selector"),
+                    website: getTxt(".website-url-selector"),
+                    lat: getTxt(".latitude-selector"),
+                    lng: getTxt(".longitude-selector"),
+                    categories: categoriesStr,
+                    hours: calendarStr
                   };
                 });
 
-                emailText = result.email;
-                websiteText = result.website;
-              } catch (err) {
-                statusText = "❌ Error: " + err.message;
-              }
+                // Write the full dataset block across Columns M through Z
+                await sheets.spreadsheets.values.update({
+                  spreadsheetId,
+                  range: `sheet1!M${rowNum}:Z${rowNum}`,
+                  valueInputOption: "RAW",
+                  requestBody: {
+                    values: [[
+                      result.name, result.street, result.city, result.state, result.zip, result.country,
+                      result.phone, result.email, result.website, result.lat, result.lng,
+                      result.categories, result.hours, "✅ SUCCESS"
+                    ]]
+                  }
+                });
 
-              // Update the target columns instantly using permanent Service Account access tokens
-              await sheets.spreadsheets.values.update({
-                spreadsheetId,
-                range: `sheet1!M${rowNum}:O${rowNum}`,
-                valueInputOption: "RAW",
-                requestBody: {
-                  values: [[emailText, websiteText, statusText]]
-                }
-              });
+              } catch (err) {
+                console.error(`Error on row ${rowNum}:`, err.message);
+                await sheets.spreadsheets.values.update({
+                  spreadsheetId,
+                  range: `sheet1!Z${rowNum}`,
+                  valueInputOption: "RAW",
+                  requestBody: { values: [["❌ Error: " + err.message]] }
+                });
+              }
               
-              // Cool down between requests to stay safe
-              await new Promise(r => setTimeout(r, 2000));
+              // Safe processing break between rows
+              await new Promise(r => setTimeout(r, 2500));
             }
             await browser.close();
           }
