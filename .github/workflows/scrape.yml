@@ -4,15 +4,19 @@ on:
     - cron: '*/15 * * * *' # Automatically checks for empty rows every 15 minutes
   workflow_dispatch: # Lets you start the process manually from your GitHub dashboard at any time
 
+# This section directly tells the GitHub runner engine to run everything on Node 24 and stop showing warnings
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
 jobs:
   sync_and_scrape:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Repository
-        uses: actions/checkout@v4.2.2 # Explicit clean release patch
+        uses: actions/checkout@v4.2.2
 
       - name: Setup Node.js Environment
-        uses: actions/setup-node@v4.1.0 # Native setup node release
+        uses: actions/setup-node@v4.1.0
         with:
           node-version: 24
 
