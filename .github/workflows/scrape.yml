@@ -1,0 +1,59 @@
+name: Remote Headless Rendering Node
+on:
+  repository_dispatch:
+    types: [fetch_url]
+
+jobs:
+  render_page:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code Base
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js Environment
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install Stealth Puppeteer Engines
+        run: npm install puppeteer puppeteer-extra puppeteer-extra-plugin-stealth axios
+
+      - name: Run Javascript Execution Engine
+        env:
+          TARGET_URL: ${{ github.event.client_payload.url }}
+          CALLBACK_URL: ${{ github.event.client_payload.callback }}
+          ROW_INDEX: ${{ github.event.client_payload.row }}
+        run: |
+          node -e '
+          const puppeteer = require("puppeteer-extra");
+          const StealthPlugin = require("puppeteer-extra-plugin-stealth");
+          const axios = require("axios");
+          puppeteer.use(StealthPlugin());
+
+          async function execute() {
+            const browser = await puppeteer.launch({ headless: true, args: ["--no-sandbox"] });
+            const page = await browser.newPage();
+            await page.setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36");
+            
+            try {
+              console.log("Navigating to target:", process.env.TARGET_URL);
+              await page.goto(process.env.TARGET_URL, { waitUntil: "networkidle2", timeout: 30000 });
+              
+              // Give the client-side JavaScript 5 seconds to fill the tags
+              await page.waitForSelector(".email-selector", { timeout: 5000 }).catch(() => {});
+              
+              const htmlOutput = await page.content();
+              
+              // Send the complete, populated HTML back to Google Sheets
+              await axios.post(process.env.CALLBACK_URL, {
+                row: process.env.ROW_INDEX,
+                html: htmlOutput
+              });
+            } catch (err) {
+              await axios.post(process.env.CALLBACK_URL, { row: process.env.ROW_INDEX, error: err.message });
+            } finally {
+              await browser.close();
+            }
+          }
+          execute();
+          '
