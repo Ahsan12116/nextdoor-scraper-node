@@ -59,34 +59,18 @@ jobs:
               requestBody: { values: [headers] }
             });
 
-            // HIGH STEALTH FLAGS: Bypasses headless detection layers completely
+            // Cleaned launch parameters - removing unstable direct proxy ports
             const launchArgs = [
               "--no-sandbox",
               "--disable-setuid-sandbox",
               "--disable-blink-features=AutomationControlled",
               "--disable-infobars",
-              "--window-size=1920,1080",
-              "--start-maximized",
-              // Route requests through a public free residential rotation node proxy to mask Datacenter IP
-              "--proxy-server=http://unblock.scrapeninja.co:8888" 
+              "--window-size=1280,800"
             ];
 
-            let browser = await puppeteer.launch({ 
-              headless: true, 
-              args: launchArgs,
-              ignoreDefaultArgs: ["--enable-automation"]
-            });
-            
+            let browser = await puppeteer.launch({ headless: true, args: launchArgs, ignoreDefaultArgs: ["--enable-automation"] });
             let page = await browser.newPage();
-            await page.setViewport({ width: 1920, height: 1080 });
-
-            // Evaluate scripts on the page to hide Puppeteer fingerprints
-            await page.evaluateOnNewDocument(() => {
-              Object.defineProperty(navigator, "webdriver", { get: () => undefined });
-              window.navigator.chrome = { runtime: {} };
-              Object.defineProperty(navigator, "languages", { get: () => ["en-US", "en"] });
-              Object.defineProperty(navigator, "plugins", { get: () => [1, 2, 3, 4, 5] });
-            });
+            await page.setViewport({ width: 1280, height: 800 });
 
             let processedCount = 0;
 
@@ -97,40 +81,45 @@ jobs:
 
               if (!url || !url.startsWith("http") || currentStatus.includes("✅")) continue;
 
-              if (processedCount > 0 && processedCount % 8 === 0) {
-                console.log("🔄 Re-initializing hard stealth browser session window...");
+              if (processedCount > 0 && processedCount % 12 === 0) {
+                console.log("🔄 Re-initializing clean browser instance...");
                 await browser.close();
-                await new Promise(r => setTimeout(r, 6000));
+                await new Promise(r => setTimeout(r, 4000));
                 browser = await puppeteer.launch({ headless: true, args: launchArgs, ignoreDefaultArgs: ["--enable-automation"] });
                 page = await browser.newPage();
-                await page.setViewport({ width: 1920, height: 1080 });
-                await page.evaluateOnNewDocument(() => {
-                  Object.defineProperty(navigator, "webdriver", { get: () => undefined });
-                  window.navigator.chrome = { runtime: {} };
-                  Object.defineProperty(navigator, "languages", { get: () => ["en-US", "en"] });
-                });
+                await page.setViewport({ width: 1280, height: 800 });
               }
 
               console.log(`Processing Row ${rowNum} (#${processedCount + 1}): ${url}`);
               processedCount++;
 
               try {
-                // Mimic genuine desktop user agents
-                await page.setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36");
+                await page.setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36");
                 
-                // Set extra headers to act as a normal browser navigation request
-                await page.setExtraHTTPHeaders({
-                  "accept-language": "en-US,en;q=0.9",
-                  "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
-                  "sec-ch-ua": "\"Chromium\";v=\"122\", \"Not(A:Brand\";v=\"24\", \"Google Chrome\";v=\"122\"",
-                  "sec-ch-ua-mobile": "?0",
-                  "sec-ch-ua-platform": "\"Windows\""
-                });
+                // Attempt direct, high-speed load first
+                let navigateSuccess = true;
+                try {
+                  await page.goto(url.trim(), { waitUntil: "domcontentloaded", timeout: 15000 });
+                } catch (timeoutErr) {
+                  console.log(`⚠️ Direct connection timed out. Activating smart rendering fallback...`);
+                  navigateSuccess = false;
+                }
 
-                await page.goto(url.trim(), { waitUntil: "domcontentloaded", timeout: 40000 });
-                
-                // Wait specifically for the core target block container to load completely
-                await page.waitForSelector(".name-selector", { timeout: 8000 }).catch(() => {});
+                // SELF-HEALING FALLBACK: If direct connection fails/times out, route via alternative text-node gateway
+                if (!navigateSuccess) {
+                  let alternativeGateway = "https://api.allorigins.win/get?url=" + encodeURIComponent(url.trim());
+                  await page.goto(alternativeGateway, { waitUntil: "domcontentloaded", timeout: 20000 });
+                  
+                  // Extract raw string text if inside an isolated iframe object container
+                  let hasJsonWrapper = await page.evaluate(() => document.body.innerText.startsWith("{"));
+                  if (hasJsonWrapper) {
+                    let rawText = await page.evaluate(() => document.body.innerText);
+                    let parsedJson = JSON.parse(rawText);
+                    await page.setContent(parsedJson.contents);
+                  }
+                }
+
+                await page.waitForSelector("body", { timeout: 5000 }).catch(() => {});
 
                 const result = await page.evaluate(() => {
                   const getTxt = (sel) => {
@@ -188,9 +177,9 @@ jobs:
                 });
               }
               
-              // Human Randomized Jitter Sleep Delay
-              const jitter = Math.floor(Math.random() * (8000 - 4000 + 1)) + 4000;
-              await new Promise(r => setTimeout(r, jitter));
+              // Standard human processing break
+              const delay = Math.floor(Math.random() * (5000 - 3000 + 1)) + 3000;
+              await new Promise(r => setTimeout(r, delay));
             }
             await browser.close();
           }
