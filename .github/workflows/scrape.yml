@@ -17,16 +17,21 @@ jobs:
           node-version: 24
 
       - name: Install Production Core Packages
-        run: npm install puppeteer googleapis
+        run: npm install puppeteer puppeteer-extra puppeteer-extra-plugin-stealth googleapis
 
       - name: Run Background Scraping Automation
         env:
           GOOGLE_CREDS: ${{ secrets.GOOGLE_CREDENTIALS }}
+          # =========================================================
+          # MAKE SURE YOUR ACTUAL GOOGLE SPREADSHEET URL ID IS HERE:
           SPREADSHEET_ID: "1aIdDfNsFdUqFDDZHpGcnppiVNVr4faOhPqrUo-rnurQ"
+          # =========================================================
         run: |
           node -e '
-          const puppeteer = require("puppeteer");
+          const puppeteer = require("puppeteer-extra");
+          const StealthPlugin = require("puppeteer-extra-plugin-stealth");
           const { google } = require("googleapis");
+          puppeteer.use(StealthPlugin());
 
           async function main() {
             const auth = new google.auth.GoogleAuth({
@@ -59,16 +64,7 @@ jobs:
               requestBody: { values: [headers] }
             });
 
-            // Cleaned launch parameters - removing unstable direct proxy ports
-            const launchArgs = [
-              "--no-sandbox",
-              "--disable-setuid-sandbox",
-              "--disable-blink-features=AutomationControlled",
-              "--disable-infobars",
-              "--window-size=1280,800"
-            ];
-
-            let browser = await puppeteer.launch({ headless: true, args: launchArgs, ignoreDefaultArgs: ["--enable-automation"] });
+            let browser = await puppeteer.launch({ headless: true, args: ["--no-sandbox", "--disable-setuid-sandbox"] });
             let page = await browser.newPage();
             await page.setViewport({ width: 1280, height: 800 });
 
@@ -81,13 +77,20 @@ jobs:
 
               if (!url || !url.startsWith("http") || currentStatus.includes("✅")) continue;
 
-              if (processedCount > 0 && processedCount % 12 === 0) {
-                console.log("🔄 Re-initializing clean browser instance...");
+              // ANTI-BOT ROTATION: Close browser every 10 records and open a brand new one
+              if (processedCount > 0 && processedCount % 10 === 0) {
+                console.log("🔄 Rotating browser engine to clear session tracking fingerprints...");
                 await browser.close();
-                await new Promise(r => setTimeout(r, 4000));
-                browser = await puppeteer.launch({ headless: true, args: launchArgs, ignoreDefaultArgs: ["--enable-automation"] });
+                await new Promise(r => setTimeout(r, 5000));
+                browser = await puppeteer.launch({ headless: true, args: ["--no-sandbox", "--disable-setuid-sandbox"] });
                 page = await browser.newPage();
                 await page.setViewport({ width: 1280, height: 800 });
+              }
+
+              // BIG COOLDOWN: Every 20 pages, take a 30-second resting pause
+              if (processedCount > 0 && processedCount % 20 === 0) {
+                console.log("⏳ Taking a 30-second human break to cool down server rate limits...");
+                await new Promise(r => setTimeout(r, 30000));
               }
 
               console.log(`Processing Row ${rowNum} (#${processedCount + 1}): ${url}`);
@@ -95,31 +98,9 @@ jobs:
 
               try {
                 await page.setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36");
+                await page.goto(url.trim(), { waitUntil: "networkidle2", timeout: 30000 });
                 
-                // Attempt direct, high-speed load first
-                let navigateSuccess = true;
-                try {
-                  await page.goto(url.trim(), { waitUntil: "domcontentloaded", timeout: 15000 });
-                } catch (timeoutErr) {
-                  console.log(`⚠️ Direct connection timed out. Activating smart rendering fallback...`);
-                  navigateSuccess = false;
-                }
-
-                // SELF-HEALING FALLBACK: If direct connection fails/times out, route via alternative text-node gateway
-                if (!navigateSuccess) {
-                  let alternativeGateway = "https://api.allorigins.win/get?url=" + encodeURIComponent(url.trim());
-                  await page.goto(alternativeGateway, { waitUntil: "domcontentloaded", timeout: 20000 });
-                  
-                  // Extract raw string text if inside an isolated iframe object container
-                  let hasJsonWrapper = await page.evaluate(() => document.body.innerText.startsWith("{"));
-                  if (hasJsonWrapper) {
-                    let rawText = await page.evaluate(() => document.body.innerText);
-                    let parsedJson = JSON.parse(rawText);
-                    await page.setContent(parsedJson.contents);
-                  }
-                }
-
-                await page.waitForSelector("body", { timeout: 5000 }).catch(() => {});
+                await page.waitForSelector(".name-selector", { timeout: 5000 }).catch(() => {});
 
                 const result = await page.evaluate(() => {
                   const getTxt = (sel) => {
@@ -177,9 +158,9 @@ jobs:
                 });
               }
               
-              // Standard human processing break
-              const delay = Math.floor(Math.random() * (5000 - 3000 + 1)) + 3000;
-              await new Promise(r => setTimeout(r, delay));
+              // HUMAN RANDOMIZED DELAY: Wait between 3 to 7 seconds before the next page
+              const dynamicDelay = Math.floor(Math.random() * (7000 - 3000 + 1)) + 3000;
+              await new Promise(r => setTimeout(r, dynamicDelay));
             }
             await browser.close();
           }
