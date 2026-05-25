@@ -1,59 +1,107 @@
-name: Remote Headless Rendering Node
+name: Unblockable Sheet Sync Engine
 on:
-  repository_dispatch:
-    types: [fetch_url]
+  schedule:
+    - cron: '*/15 * * * *' # Runs automatically every 15 minutes to clear your queue tab safely
+  workflow_dispatch: # Allows you to force a live run manually via your actions tab anytime
 
 jobs:
-  render_page:
+  sync_and_scrape:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout Code Base
+      - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Setup Node.js Environment
+      - name: Setup Node Node Environment
         uses: actions/setup-node@v4
         with:
           node-version: 20
 
-      - name: Install Stealth Puppeteer Engines
-        run: npm install puppeteer puppeteer-extra puppeteer-extra-plugin-stealth axios
+      - name: Install Production Core Packages
+        run: npm install puppeteer puppeteer-extra puppeteer-extra-plugin-stealth googleapis
 
-      - name: Run Javascript Execution Engine
+      - name: Run Background Scraping Automation
         env:
-          TARGET_URL: ${{ github.event.client_payload.url }}
-          CALLBACK_URL: ${{ github.event.client_payload.callback }}
-          ROW_INDEX: ${{ github.event.client_payload.row }}
+          GOOGLE_CREDS: ${{ secrets.GOOGLE_CREDENTIALS }}
+          # =========================================================
+          # PASTE YOUR ACTUAL GOOGLE SPREADSHEET URL ID HERE:
+          SPREADSHEET_ID: "PASTE_YOUR_SPREADSHEET_ID_HERE"
+          # =========================================================
         run: |
           node -e '
           const puppeteer = require("puppeteer-extra");
           const StealthPlugin = require("puppeteer-extra-plugin-stealth");
-          const axios = require("axios");
+          const { google } = require("googleapis");
           puppeteer.use(StealthPlugin());
 
-          async function execute() {
+          async function main() {
+            const auth = new google.auth.GoogleAuth({
+              credentials: JSON.parse(process.env.GOOGLE_CREDS),
+              scopes: ["https://www.googleapis.com/auth/spreadsheets"]
+            });
+            const sheets = google.sheets({ version: "v4", auth });
+            const spreadsheetId = process.env.SPREADSHEET_ID;
+
+            // Fetch current rows from sheet1 tab
+            const response = await sheets.spreadsheets.values.get({
+              spreadsheetId,
+              range: "sheet1!A2:O"
+            });
+            
+            const rows = response.data.values;
+            if (!rows || rows.length === 0) {
+              console.log("No targets found inside sheet rows.");
+              return;
+            }
+
             const browser = await puppeteer.launch({ headless: true, args: ["--no-sandbox"] });
             const page = await browser.newPage();
             await page.setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36");
-            
-            try {
-              console.log("Navigating to target:", process.env.TARGET_URL);
-              await page.goto(process.env.TARGET_URL, { waitUntil: "networkidle2", timeout: 30000 });
-              
-              // Give the client-side JavaScript 5 seconds to fill the tags
-              await page.waitForSelector(".email-selector", { timeout: 5000 }).catch(() => {});
-              
-              const htmlOutput = await page.content();
-              
-              // Send the complete, populated HTML back to Google Sheets
-              await axios.post(process.env.CALLBACK_URL, {
-                row: process.env.ROW_INDEX,
-                html: htmlOutput
+
+            for (let i = 0; i < rows.length; i++) {
+              let url = rows[i][0];
+              let currentStatus = rows[i][14] ? rows[i][14].toString() : "";
+              let rowNum = i + 2; 
+
+              if (!url || !url.startsWith("http") || currentStatus.includes("✅")) continue;
+
+              console.log(`Processing Row ${rowNum}: ${url}`);
+              let emailText = "Not found";
+              let websiteText = "Not found";
+              let statusText = "✅ SUCCESS";
+
+              try {
+                await page.goto(url.trim(), { waitUntil: "networkidle2", timeout: 30000 });
+                await page.waitForSelector(".email-selector", { timeout: 5000 }).catch(() => {});
+
+                const result = await page.evaluate(() => {
+                  const eEl = document.querySelector(".email-selector");
+                  const wEl = document.querySelector(".website-url-selector");
+                  return {
+                    email: eEl ? eEl.innerText.trim() : "Not found",
+                    website: wEl ? wEl.innerText.trim() : "Not found"
+                  };
+                });
+
+                emailText = result.email;
+                websiteText = result.website;
+              } catch (err) {
+                statusText = "❌ Error: " + err.message;
+              }
+
+              // Update the target columns instantly using permanent Service Account access tokens
+              await sheets.spreadsheets.values.update({
+                spreadsheetId,
+                range: `sheet1!M${rowNum}:O${rowNum}`,
+                valueInputOption: "RAW",
+                requestBody: {
+                  values: [[emailText, websiteText, statusText]]
+                }
               });
-            } catch (err) {
-              await axios.post(process.env.CALLBACK_URL, { row: process.env.ROW_INDEX, error: err.message });
-            } finally {
-              await browser.close();
+              
+              // Cool down between requests to stay safe
+              await new Promise(r => setTimeout(r, 2000));
             }
+            await browser.close();
           }
-          execute();
+          main().catch(console.error);
           '
